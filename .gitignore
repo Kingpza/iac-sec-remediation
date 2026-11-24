@@ -1,0 +1,30 @@
+# Python & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# Local secrets & credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Student dataset & anonymized staging (never push student repos publicly)
+dataset/
+
+# Intermediate raw scan JSONs & temporary outputs
+reports/raw/
+reports/llm_patched_preview/
+reports/prowler/
+reports/scoutsuite/
+reports/repos/
+reports/_*
+reports/AGGREGATE_SUMMARY.md
+reports/aggregate_report.json
+reports/LLM_VERIFICATION_REPORT.md
+reports/llm_verification_report.json
+reports/CLOUD_AUDIT_REPORT.md

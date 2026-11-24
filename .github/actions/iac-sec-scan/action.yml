@@ -1,0 +1,114 @@
+name: "IaC Security Scan & LLM Remediation"
+description: "Quet loi cau hinh bao mat IaC (Checkov + Gitleaks), an danh du lieu nhay cam, thong ke theo loai va sinh goi y khac phuc."
+inputs:
+  target_dir:
+    description: "Thu muc ma nguon can quet (mac dinh '.' cho toan bo repo do an)"
+    required: false
+    default: "."
+  after_dir:
+    description: "Thu muc da sua de doi chieu va tinh ty le vuot quet lai (tuy chon)"
+    required: false
+    default: ""
+  repo_id:
+    description: "Ma dinh danh du an da an danh (mac dinh ten repository)"
+    required: false
+    default: "${{ github.repository }}"
+  gemini_api_key:
+    description: "Gemini API key de sinh goi y bang LLM (tuy chon, bo trong neu chi quet va thong ke)"
+    required: false
+    default: ""
+  gitleaks_config:
+    description: "Duong dan file cau hinh .gitleaks.toml tuy chon"
+    required: false
+    default: ""
+  out_dir:
+    description: "Thu muc xuat bao cao"
+    required: false
+    default: "reports"
+  fail_on_findings:
+    description: "Tra ma loi CI neu phat hien vi pham (true/false)"
+    required: false
+    default: "false"
+
+outputs:
+  report_markdown:
+    description: "Duong dan file bao cao Markdown"
+    value: "${{ steps.run-pipeline.outputs.report_markdown }}"
+  report_json:
+    description: "Duong dan file bao cao JSON"
+    value: "${{ steps.run-pipeline.outputs.report_json }}"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Checkov and Gitleaks
+      shell: bash
+      run: |
+        pip install --quiet checkov
+        if ! command -v gitleaks >/dev/null 2>&1; then
+          wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar -xzf gitleaks_8.21.2_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          rm -f gitleaks_8.21.2_linux_x64.tar.gz
+        fi
+
+    - name: Run Checkov and Gitleaks Scans
+      shell: bash
+      run: |
+        mkdir -p "${{ inputs.out_dir }}/raw"
+        rm -f "${{ inputs.out_dir }}/raw/checkov_before.json" "${{ inputs.out_dir }}/raw/gitleaks_before.json" \
+              "${{ inputs.out_dir }}/raw/checkov_after.json" "${{ inputs.out_dir }}/raw/gitleaks_after.json"
+
+        checkov -d "${{ inputs.target_dir }}" --enable-secret-scan-all-files --quiet --output json --soft-fail > "${{ inputs.out_dir }}/raw/checkov_before.json"
+
+        GL_CFG_ARG=""
+        if [ -n "${{ inputs.gitleaks_config }}" ] && [ -f "${{ inputs.gitleaks_config }}" ]; then
+          GL_CFG_ARG="--config=${{ inputs.gitleaks_config }}"
+        fi
+
+        gitleaks detect --source="${{ inputs.target_dir }}" --no-git $GL_CFG_ARG \
+          --report-format=json --report-path="${{ inputs.out_dir }}/raw/gitleaks_before.json" --exit-code=0
+
+        if [ -n "${{ inputs.after_dir }}" ]; then
+          checkov -d "${{ inputs.after_dir }}" --enable-secret-scan-all-files --quiet --output json --soft-fail > "${{ inputs.out_dir }}/raw/checkov_after.json"
+          gitleaks detect --source="${{ inputs.after_dir }}" --no-git $GL_CFG_ARG \
+            --report-format=json --report-path="${{ inputs.out_dir }}/raw/gitleaks_after.json" --exit-code=0
+        fi
+
+    - name: Run Normalization, Redaction & Remediation Pipeline
+      id: run-pipeline
+      shell: bash
+      env:
+        GEMINI_API_KEY: ${{ inputs.gemini_api_key }}
+      run: |
+        MODE="scan"
+        EXTRA_ARGS=""
+        if [ -n "${{ inputs.after_dir }}" ]; then
+          MODE="verify"
+          EXTRA_ARGS="--after-dir ${{ inputs.after_dir }} --checkov-after ${{ inputs.out_dir }}/raw/checkov_after.json --gitleaks-after ${{ inputs.out_dir }}/raw/gitleaks_after.json --strip-before-prefix ${{ inputs.target_dir }} --strip-after-prefix ${{ inputs.after_dir }}"
+        else
+          EXTRA_ARGS="--strip-before-prefix ${{ inputs.target_dir }}"
+        fi
+
+        python3 "${{ github.action_path }}/../../../scripts/pipeline.py" \
+          --mode "$MODE" \
+          --repo-id "${{ inputs.repo_id }}" \
+          --source-dir "${{ inputs.target_dir }}" \
+          --checkov-before "${{ inputs.out_dir }}/raw/checkov_before.json" \
+          --gitleaks-before "${{ inputs.out_dir }}/raw/gitleaks_before.json" \
+          --out-json "${{ inputs.out_dir }}/normalized_remediation_report.json" \
+          --out-md "${{ inputs.out_dir }}/SUMMARY_REPORT.md" \
+          $EXTRA_ARGS
+
+        cat "${{ inputs.out_dir }}/SUMMARY_REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+        echo "report_markdown=${{ inputs.out_dir }}/SUMMARY_REPORT.md" >> "$GITHUB_OUTPUT"
+        echo "report_json=${{ inputs.out_dir }}/normalized_remediation_report.json" >> "$GITHUB_OUTPUT"
+
+        if [ "${{ inputs.fail_on_findings }}" = "true" ]; then
+          python3 -c "import json, sys; d=json.load(open('${{ inputs.out_dir }}/normalized_remediation_report.json'))['summary_metrics']; bad = d['remaining_count'] if d['mode']=='verify' else d['total_before']; sys.exit(1 if (bad or 0) > 0 else 0)"
+        fi

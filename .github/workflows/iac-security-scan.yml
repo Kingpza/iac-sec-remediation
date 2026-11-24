@@ -1,0 +1,40 @@
+name: Quet loi cau hinh bao mat IaC & Sinh goi y khac phuc
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      target_dir:
+        description: "Thu muc can quet (mac dinh '.' cho toan bo repo)"
+        required: false
+        default: "."
+      after_dir:
+        description: "Thu muc doi chung da sua (de trong neu chi quet mot thu muc)"
+        required: false
+        default: ""
+
+jobs:
+  devsecops-iac-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run IaC Security Scan & Remediation Action
+        uses: ./.github/actions/iac-sec-scan
+        with:
+          target_dir: ${{ inputs.target_dir || '.' }}
+          after_dir: ${{ inputs.after_dir || '' }}
+          repo_id: ${{ github.repository }}
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gitleaks_config: .gitleaks.toml
+          out_dir: reports
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iac-security-audit-reports
+          path: reports/
